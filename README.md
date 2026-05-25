@@ -16,9 +16,10 @@ Developer-facing guide for the **MotionApi `/v1` public API**. It tells you how 
 6. [Streaming — WebSocket & SSE](#streaming--websocket--sse)
 7. [Packet formats — `raw` vs `formatted`](#packet-formats--raw-vs-formatted)
 8. [Rate limits & error envelope](#rate-limits--error-envelope)
-9. [Reference examples](#reference-examples)
-   - [Browser — API Explorer](#example-1--browser-api-explorer)
-   - [Python — Position logger](#example-2--python-position-logger)
+9. [Device modes](#device-modes)
+10. [Reference examples](#reference-examples)
+    - [Browser — API Explorer](#example-1--browser-api-explorer)
+    - [Python — Stream logger](#example-2--python-stream-logger)
 
 ---
 
@@ -267,6 +268,69 @@ Every error response has `success: false` and an `error.code` you can switch on.
 
 ---
 
+## Device modes
+
+Each tracker runs in one of **14 mode presets**. The mode controls how often GPS is read, whether the device sends each fix immediately or buffers them, how often status frames go out, and whether IMU streaming is on. Switch modes from the API with `PUT /v1/devices/:iccid/mode` (requires `write:mode`); read the current mode with `GET /v1/devices/:iccid/mode`; get the full catalog at `GET /v1/devices/_modes`.
+
+The 14 presets split into two families:
+
+- **Standard modes** — the device sends **one position per fix, immediately**. Pick these for real-time tracking where each update should leave the device as fast as possible. Data on the wire is one MQTT message per fix.
+- **Logging modes** — the device samples GPS at 10 Hz into an on-device ring buffer (4000 positions) and sends them in **batches** over a compact binary frame on the `bin` topic. Pick these when you care about data efficiency, route fidelity, or surviving connectivity gaps. A 10-second batch arrives as ~100 positions across 3 MQTT packets (max 42 positions/packet — SARA-R422's 1024 B MQTT limit).
+
+### Standard modes
+
+| ID | Label             | Rate                | Status interval | Best for                                            |
+|----|-------------------|---------------------|-----------------|-----------------------------------------------------|
+| 1  | Default           | 1 position/s        | 30 s            | Day-to-day tracking, balanced data usage            |
+| 2  | High Performance  | 10 Hz (every fix)   | 30 s            | Maximum real-time, racing/track-day, demos          |
+| 5  | Fast 500ms        | 2 positions/s       | 30 s            | Brisk real-time with moderate data usage            |
+| 6  | Fast 250ms        | 4 positions/s       | 30 s            | High real-time, motorsport, drone follow            |
+| 3  | Slow              | 1 position/10s      | 60 s            | Long-haul, conservation of SIM data                 |
+| 4  | Very Slow         | 1 position/min      | 180 s           | Stationary assets, ultra-low data usage             |
+
+### Logging modes
+
+10 Hz GPS sampling, batched binary send over `t/{ICCID}/bin` → arrives via `/v1/stream` (or `bin` snapshot) decoded into individual `gps_batch` packets.
+
+| ID | Label        | Drain interval     | Approx batch size           | Best for                                              |
+|----|--------------|--------------------|-----------------------------|-------------------------------------------------------|
+| 20 | Log HP       | ASAP (every fix)   | 1 position                  | Highest fidelity, near-real-time, low overhead       |
+| 27 | Log 250ms    | 250 ms             | ~2–3 positions              | High fidelity with batching savings                  |
+| 28 | Log 500ms    | 500 ms             | ~5 positions                | Smooth track, moderate data usage                    |
+| 21 | Log 1s       | 1 s                | ~10 positions               | Common general-purpose logging                       |
+| 22 | Log 2s       | 2 s                | ~20 positions                | Cycling / running / hiking                          |
+| 23 | Log 3s       | 3 s                | ~30 positions                | Long routes, fewer packets                          |
+| 25 | Log 5s       | 5 s                | ~50 positions (2 packets)    | Drives, long sessions                               |
+| 26 | Log 10s     | 10 s               | ~100 positions (3 packets)   | Maximum data savings, long routes                   |
+
+> Mode IDs are deliberately sparse (gaps at 7–19, 24, 29+) so new presets can be added later without renumbering.
+
+### How modes look on the wire
+
+| Mode family | Topic the device publishes to | What you see via `/v1/stream` (formatted) |
+|---|---|---|
+| Standard    | `t/{ICCID}/gps`               | `payload.kind = "gps"` — one packet per fix         |
+| Logging     | `t/{ICCID}/bin`               | `payload.kind = "gps_batch"` — N positions inside one frame, server expands each into its own delivery (you'll see `#01/05 … #02/05 …` markers per batch) |
+
+Both families also publish `t/{ICCID}/status` periodically and `t/{ICCID}/event` on motion-start / fall / button press / MARK.
+
+### Switching modes
+
+```bash
+# Read current
+curl -H "Authorization: Bearer $KEY" \
+  https://api.motionapi.pro/v1/devices/8988228066680471572/mode
+
+# Switch to "Log 1s" (mode 21)
+curl -X PUT -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"mode": 21}' \
+  https://api.motionapi.pro/v1/devices/8988228066680471572/mode
+```
+
+Mode changes are delivered via downlink MQTT and applied on the device immediately. Persisted in device NVS, so it survives reboot/power-cycle.
+
+---
+
 ## Reference examples
 
 We ship two open examples — pick whichever matches your stack.
@@ -308,39 +372,50 @@ Required scopes follow the table in [§ Endpoints](#endpoints--rest). The explor
 
 **When to use:** as a sanity check after issuing a key, to demo the system, or as a starting point for a custom dashboard (fork the HTML, strip what you don't need).
 
-### Example 2 — Python position logger
+### Example 2 — Python stream logger
 
-A small Python script that subscribes to one tracker and writes every position to a CSV file. Useful for field testing, drive runs, and offline analysis.
+A single-file Python script that connects to `/v1/stream` for one device and appends a human-readable, one-line-per-packet log file. GPS positions, status frames, events, IMU batches, and command responses each get a timestamped row. Useful for field testing, drive runs, batch analysis, or as a starting point for any "background process that needs every packet" integration.
 
-- **Location:** `MotionApi-Platform/tools/python/log_positions.py` *(private repo — ask if you need access)*
-- **Dependencies:** `paho-mqtt`, `python-dotenv` (`pip install -r requirements.txt`)
+- **Repo:** <https://github.com/MotionApi/example-api-python-logger>
+- **What's inside:** one `motionapi_logger.py` (~19 KB), one dependency (`websockets`), Python 3.9+.
 
-**Important — different transport:** This script talks to the MQTT broker directly (`mqtts://msg.f12lab.net:8883`) rather than going through the `/v1` API. It needs **MQTT broker credentials**, not an API key. We use it for internal field testing; if you want to do the same thing as an external integrator, please ask us — for most cases the WebSocket / SSE route from Example 1 is the right answer (no broker credentials needed, works the same).
-
-**How it works:**
-
-```
-device  →  MQTT broker  →  log_positions.py  →  positions_<iccid>_<timestamp>.csv
-                                ↑
-                          paho-mqtt over TLS
-                                ↑
-                          credentials from .env
-```
-
-- Subscribes to `t/{ICCID}/bin` (binary, used by logging modes 20–28) **and** `t/{ICCID}/gps` (JSON, used by standard modes 1–6).
-- Parses the binary frame format (sync `0x4D 0x41`, Fletcher-8 checksum, 24-byte GPS records) inline — see the top of `log_positions.py` for the decode loop.
-- Writes one CSV row per position with both the device-side GPS timestamp and the host arrival timestamp (UTC).
-- Flushes after every row so the file survives a `Ctrl+C`.
+**Required scope:** `read:stream` (plus `read:devices` for nicer startup output).
 
 **Run:**
 
 ```bash
-cd MotionApi-Platform/tools/python
+git clone https://github.com/MotionApi/example-api-python-logger.git
+cd example-api-python-logger
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python log_positions.py --iccid 8988228066680471572 --env ../../apps/backend/.env
+
+python motionapi_logger.py \
+  --api-key mak_live_abcd1234_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6 \
+  --device 8988228066680471572
 ```
 
-The script also serves as a reference implementation of the binary frame decoder if you want to consume `format=raw` packets from the `/v1` stream and parse them yourself.
+Or via environment variables (drop them in `.env` next to the script):
+
+```bash
+export MOTIONAPI_KEY=mak_live_…
+export MOTIONAPI_DEVICE=8988228066680471572
+python motionapi_logger.py
+```
+
+**Log output looks like:**
+
+```
+# motionapi-logger session  start=2026-05-25 14:30:00.001  backend=https://api.motionapi.pro  device=8931… topics=gps,status,event,imu,response,bin
+2026-05-25 14:30:00.118  -                         ready      ws_connected scopes=read:stream,read:devices authorized_devices=3
+2026-05-25 14:30:01.503  2026-05-25T12:30:01.000Z  gps        seq=42 lat=52.227762 lon=21.011510 speed=0.0km/h hdg=0.0° alt=118.4m sats=10 batt=4.05V
+2026-05-25 14:30:01.612  -                         status     seq=43 batt=4.05V rssi=-67dBm rsrp=-87dBm cell=260-1#12345 mode=Default(1) moving=no
+2026-05-25 14:30:30.701  2026-05-25T12:30:28.000Z  gps_batch  seq=46 #01/05 lat=52.227800 lon=21.011520 speed=12.4km/h …
+2026-05-25 14:30:30.701  2026-05-25T12:30:29.000Z  gps_batch  seq=46 #02/05 lat=52.227830 lon=21.011540 speed=13.1km/h …
+```
+
+Each row carries **two timestamps** — local wall-clock receive and the device-side timestamp (`-` when there is none, e.g. for `status`) — so you can spot delivery lag at a glance.
+
+**When to use:** drive-test logging, headless field captures, batch / offline pipelines, anywhere a small, deps-light Python process is more natural than a browser tab. Copy the file, strip what you don't need; it's MIT-licensed.
 
 ---
 
