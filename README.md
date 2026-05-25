@@ -282,11 +282,14 @@ A single-file HTML demo of every `/v1` surface (snapshots, streams, commands, mo
 **How to use:**
 
 1. Open the live URL or clone the repo and `open index.html`.
-2. Paste your API key into the header field. The device list loads on the left as soon as the key is accepted.
+2. Paste your API key into the header field and click **Connect**.
+
+   ![Explorer header — API URL + key fields](screenshots/explorer-connect.png)
+
+3. Pick a device from the left sidebar. The Snapshot tab opens automatically with the latest packet on every topic the device speaks.
 
    ![Explorer Snapshot tab — device list on the left, last packets per topic on the right](screenshots/explorer-snapshot-tab.png)
 
-3. Pick a device from the left sidebar.
 4. Use the tabs:
    - **Snapshot** — latest packet on every topic, toggle `formatted` ↔ `raw` (shown above).
    - **Live Stream** — `wss://…/v1/stream` with per-topic filter and format selector. Tail-scrolling log of every packet:
