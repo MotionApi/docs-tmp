@@ -19,7 +19,6 @@ Developer-facing guide for the **MotionApi `/v1` public API**. It tells you how 
 9. [Reference examples](#reference-examples)
    - [Browser — API Explorer](#example-1--browser-api-explorer)
    - [Python — Position logger](#example-2--python-position-logger)
-10. [Where to put screenshots](#where-to-put-screenshots)
 
 ---
 
@@ -42,16 +41,24 @@ All real-time data flows through the backend; you never need MQTT credentials.
 ## Getting an API key
 
 1. Sign in to the **user panel** at <https://app.motionapi.pro>.
-2. From the left nav choose **API Access**. *(screenshot needed — see [§ screenshots](#where-to-put-screenshots))*
+2. From the left nav choose **API Access**.
+
+   ![API Access page in the user panel](screenshots/api-access-page.png)
+
 3. Click **Create Key** in the top-right.
-4. In the modal: *(screenshot needed)*
+4. In the modal, fill in:
    - **Name** — anything that helps you remember which integration uses it.
    - **Environment** — `live` (production) or `test`.
    - **Scopes** — pick only what you need. Defaults to `read:devices`, `read:stream`, `read:last`.
    - **Devices** — leave empty for "all my devices" or pick a subset.
    - **Rate limit** — leave empty to use the default 60 req/min; raise it if you have an approved use case.
    - **Expires at** — optional ISO date for an auto-expiring key.
-5. Click **Create**. The full key is shown **once** — copy it now. *(screenshot needed)* After you close the modal the secret is gone (only the prefix is retrievable later). If you lose it, **rotate the key**.
+
+   ![Create Key modal with scope checkboxes](screenshots/create-key-modal.png)
+
+5. Click **Create**. The full key is shown **once** — copy it now. After you close the modal the secret is gone (only the prefix is retrievable later). If you lose it, **rotate the key**.
+
+   ![Created key reveal — copy the full secret before closing](screenshots/key-created-reveal.png)
 
 A key looks like:
 
@@ -275,13 +282,24 @@ A single-file HTML demo of every `/v1` surface (snapshots, streams, commands, mo
 **How to use:**
 
 1. Open the live URL or clone the repo and `open index.html`.
-2. Paste your API key into the header field. *(screenshot needed — see [§ screenshots](#where-to-put-screenshots))*
+2. Paste your API key into the header field. The device list loads on the left as soon as the key is accepted.
+
+   ![Explorer Snapshot tab — device list on the left, last packets per topic on the right](screenshots/explorer-snapshot-tab.png)
+
 3. Pick a device from the left sidebar.
 4. Use the tabs:
-   - **Snapshot** — latest packet on every topic, toggle `formatted` ↔ `raw`.
-   - **Live Stream** — `wss://…/v1/stream` with per-topic filter and format selector. *(screenshot needed — the running live-stream view is the best advert for the API)*
-   - **Commands** — quick buttons that hit `POST /v1/devices/:iccid/commands`.
-   - **Mode** — read + change the mode preset (`PUT /v1/devices/:iccid/mode`).
+   - **Snapshot** — latest packet on every topic, toggle `formatted` ↔ `raw` (shown above).
+   - **Live Stream** — `wss://…/v1/stream` with per-topic filter and format selector. Tail-scrolling log of every packet:
+
+     ![Explorer Live Stream tab — real-time WebSocket data](screenshots/explorer-live-stream.png)
+
+   - **Commands** — quick buttons that hit `POST /v1/devices/:iccid/commands`:
+
+     ![Explorer Commands tab — quick action buttons](screenshots/explorer-commands-tab.png)
+
+   - **Mode** — read + change the mode preset (`PUT /v1/devices/:iccid/mode`):
+
+     ![Explorer Mode tab — switch between the 14 mode presets](screenshots/explorer-mode-tab.png)
 
 Required scopes follow the table in [§ Endpoints](#endpoints--rest). The explorer surfaces backend 401/403 errors inline so you know exactly which scope you forgot.
 
@@ -320,25 +338,6 @@ python log_positions.py --iccid 8988228066680471572 --env ../../apps/backend/.en
 ```
 
 The script also serves as a reference implementation of the binary frame decoder if you want to consume `format=raw` packets from the `/v1` stream and parse them yourself.
-
----
-
-## Where to put screenshots
-
-For the rendered version of this guide we want a handful of UI screenshots. Save PNGs into `screenshots/` and reference them inline as `![alt](screenshots/<filename>.png)`. Suggested shots (16:9 or whatever native resolution is, dark theme):
-
-| Filename                         | What to capture                                                                                                                                |
-|----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
-| `api-access-page.png`            | User panel → API Access. Empty state if possible, so devs see "Create Key" affordance.                                                         |
-| `create-key-modal.png`           | The Create Key modal with the scope checkboxes visible.                                                                                        |
-| `key-created-reveal.png`         | The post-creation view that shows the full key once + the "save it now, you won't see it again" warning.                                       |
-| `explorer-connect.png`           | The Explorer header with API + KEY fields filled, status dot green, **before** the device list loads (clean state).                            |
-| `explorer-snapshot-tab.png`      | Snapshot tab showing one device's latest packets across topics — good for "this is what an integrator sees on day one".                       |
-| `explorer-live-stream.png`       | Live Stream tab actively streaming packets — best single advert for the API.                                                                   |
-| `explorer-commands-tab.png`      | Commands tab right after firing `buzzer` or `identify`, with the response panel visible.                                                       |
-| `explorer-mode-tab.png`          | Mode tab with the preset dropdown open showing the 14 modes.                                                                                   |
-
-When you've got them, drop them into `screenshots/` and update the doc — *(screenshot needed)* markers in the text above mark the spots.
 
 ---
 
