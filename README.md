@@ -20,6 +20,7 @@ Developer-facing guide for the **MotionApi `/v1` public API**. It tells you how 
 10. [Reference examples](#reference-examples)
     - [Browser — API Explorer](#example-1--browser-api-explorer)
     - [Python — Stream logger](#example-2--python-stream-logger)
+11. [Binary protocol reference](binary-protocol.md) — wire format for `format=raw`
 
 ---
 
@@ -238,7 +239,7 @@ Every read endpoint and stream subscription accepts a `format`:
 - **`formatted`** *(default)* — JSON, SI units (m/s, meters, degrees), with mode preset expanded inline. Easiest to consume.
 - **`raw`** — exact bytes received from the device. Binary frames (`bin` topic, currently the production path for GPS) come as base64 plus per-frame metadata so you can decode them yourself. Choose this if you want to write your own decoder, archive bytes 1:1, or debug.
 
-The wire-level frame format for binary topics (sync `0x4D 0x41`, 8-bit type, LE16 length, payload, Fletcher-8 checksum) is documented inline in the platform's `packages/shared/constants/protocol.ts` (private repo — ask if you need access).
+The full wire-level frame format for binary topics (sync `0x4D 0x41`, 8-bit type, LE16 length, payload, Fletcher-8 checksum) — including the GPS / Status / IMU / MARK record layouts, batch encoding, multi-frame concatenation rules, and a byte-by-byte worked example — is documented in **[Binary protocol reference (binary-protocol.md)](binary-protocol.md)**.
 
 ---
 
