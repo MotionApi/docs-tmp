@@ -1,8 +1,8 @@
 # MotionApi Public API — Developer Guide
 
-This is the temporary developer-facing guide for the **MotionApi `/v1` public API**. It tells you how to issue an API key, what endpoints exist, how to receive real-time data, and how to run the two reference examples we ship.
+Developer-facing guide for the **MotionApi `/v1` public API**. It tells you how to issue an API key, what endpoints exist, how to receive real-time data, and how to run the two reference examples we ship.
 
-> **Heads up:** these docs live in a separate repo (`docs-tmp`) only while the public docs site is being designed. The auto-generated OpenAPI reference at <https://api.motionapi.pro/v1/docs> is always the source of truth for request/response shapes.
+> The auto-generated OpenAPI reference at <https://api.motionapi.pro/v1/docs> is the source of truth for request and response shapes. This guide explains the **how** and the **why** around it.
 
 ---
 
@@ -291,7 +291,7 @@ Required scopes follow the table in [§ Endpoints](#endpoints--rest). The explor
 
 A small Python script that subscribes to one tracker and writes every position to a CSV file. Useful for field testing, drive runs, and offline analysis.
 
-- **Location:** `MotionApi-Platform/tools/python/log_positions.py` *(private repo — ask if you need access; copy will eventually move into a public examples repo)*
+- **Location:** `MotionApi-Platform/tools/python/log_positions.py` *(private repo — ask if you need access)*
 - **Dependencies:** `paho-mqtt`, `python-dotenv` (`pip install -r requirements.txt`)
 
 **Important — different transport:** This script talks to the MQTT broker directly (`mqtts://msg.f12lab.net:8883`) rather than going through the `/v1` API. It needs **MQTT broker credentials**, not an API key. We use it for internal field testing; if you want to do the same thing as an external integrator, please ask us — for most cases the WebSocket / SSE route from Example 1 is the right answer (no broker credentials needed, works the same).
@@ -325,7 +325,7 @@ The script also serves as a reference implementation of the binary frame decoder
 
 ## Where to put screenshots
 
-For the rendered version of this guide we want a handful of UI screenshots. Save PNGs into `docs-tmp/screenshots/` and reference them inline as `![alt](screenshots/<filename>.png)`. Suggested shots (16:9 or whatever native resolution is, dark theme):
+For the rendered version of this guide we want a handful of UI screenshots. Save PNGs into `screenshots/` and reference them inline as `![alt](screenshots/<filename>.png)`. Suggested shots (16:9 or whatever native resolution is, dark theme):
 
 | Filename                         | What to capture                                                                                                                                |
 |----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -338,10 +338,10 @@ For the rendered version of this guide we want a handful of UI screenshots. Save
 | `explorer-commands-tab.png`      | Commands tab right after firing `buzzer` or `identify`, with the response panel visible.                                                       |
 | `explorer-mode-tab.png`          | Mode tab with the preset dropdown open showing the 14 modes.                                                                                   |
 
-When you've got them, drop them into `docs-tmp/screenshots/` and update the doc — I left the *(screenshot needed)* markers above for easy find-and-replace.
+When you've got them, drop them into `screenshots/` and update the doc — *(screenshot needed)* markers in the text above mark the spots.
 
 ---
 
 ## Questions / feedback
 
-While these docs are temporary, the email is the fastest channel — contact via <https://motionapi.pro>. Once the permanent docs site is up these pages move there verbatim and this repo is archived.
+Reach out via <https://motionapi.pro>.
