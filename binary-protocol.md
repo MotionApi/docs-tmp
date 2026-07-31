@@ -1,6 +1,6 @@
 # MA Binary Protocol — Wire Format Reference
 
-This document specifies the **MA Protocol** (MotionApi binary protocol), the on-the-wire frame format that the tracker uses to publish GPS, status, IMU, and MARK data to the broker on the `bin` topic. It's UBX-inspired (uBlox GNSS protocol family) and is what you receive byte-for-byte when you call any `/v1` read endpoint with `format=raw`.
+This document specifies the **MA Protocol** (MotionApi binary protocol), the on-the-wire frame format that the tracker uses to publish GPS, status and MARK data to the broker on the `bin` topic. It's UBX-inspired (uBlox GNSS protocol family) and is what you receive byte-for-byte from the `/v1` packet surfaces — `GET /v1/devices/:iccid/last[/:topic]`, `WS /v1/stream` and SSE `/v1/devices/:iccid/stream` — when you ask for `format=raw`.
 
 > **You usually don't need this.** The `/v1` API gives you `format=formatted` by default — fully decoded JSON in SI units. Use `format=raw` (and this document) only when you want to write your own decoder, archive bytes exactly as transmitted, or debug protocol-level issues.
 
@@ -8,9 +8,11 @@ This document specifies the **MA Protocol** (MotionApi binary protocol), the on-
 
 ## Why binary
 
-Standard MQTT JSON payloads are ~250 B per GPS fix and ~500 B per status frame. Over LTE-M with a 1024 B MQTT cap and SIM data budgets that matter, that's a lot of overhead. The binary protocol gives ~90 % reduction: a complete GPS fix fits in 24 B, a full status frame in 32 B. That makes batching practical — a 10-second logging-mode burst of 100 positions is ~3 packets instead of dozens.
+Over LTE-M with a 1024 B MQTT payload cap and SIM data budgets that matter, encoding overhead is the dominant cost. A complete GPS fix fits in **25 B** and a full device status in **34 B**. Those same eight GPS fields encoded as minified JSON — `{"ts":1785489247,"ms":200,"lat":52.1846384,"lon":21.0581505,"speed":4.12,"alt":108.25,"hacc":1.45,"cadence":74}` — take 111 B, and that is before MQTT topic and framing overhead.
 
-The tracker uses this format on `t/{ICCID}/bin`. Standard modes (1–6) also still publish JSON on `t/{ICCID}/gps` for backwards compatibility; logging modes (20–28) only use `bin`.
+Compactness is what makes batching practical: at 25 B per record, **40 positions** fit in a single 1008-byte frame.
+
+All telemetry — GPS, STATUS and MARK, in every mode — is published as binary MA frames on `t/{ICCID}/bin`. The device publishes JSON on exactly one uplink topic, `t/{ICCID}/response`, and only for command / OTA acknowledgements. Downlink commands arrive on `c/{ICCID}/#`.
 
 ---
 
@@ -47,8 +49,10 @@ Total size = 7 + N bytes (5-byte header + payload + 2-byte checksum)
 | `MA_HEADER_SIZE`          | 5     | `SYNC_1 + SYNC_2 + MSG_TYPE + LENGTH`                              |
 | `MA_CHECKSUM_SIZE`        | 2     | `CK_A + CK_B`                                                      |
 | `MA_FRAME_OVERHEAD`       | 7     | Header + checksum                                                  |
-| `MQTT_MAX_PAYLOAD_BYTES`  | 1024  | Hard limit — uBlox SARA-R422 `AT+UMQTTC=9` MQTT payload max        |
-| `GPS_BATCH_MAX_COUNT`     | 42    | `(1024 − 7 overhead − 1 count) / 24 B per record`                  |
+| `MQTT_MAX_PAYLOAD_BYTES`  | 1024  | Hard limit — uBlox LEXI-R422 `AT+UMQTTC=9` MQTT payload max        |
+| `GPS_BATCH_MAX_COUNT`     | 40    | `(1024 − 7 overhead − 1 count) / 25 B per record`                  |
+
+`GPS_BATCH_MAX_COUNT` is **derived, not fixed** — the firmware computes it at runtime from `sizeof(gps_record_t)`. It was 42 while the record was 24 B. Compute it yourself rather than hard-coding it; see [Versioning and forward compatibility](#versioning-and-forward-compatibility).
 
 ---
 
@@ -66,49 +70,88 @@ def fletcher8(data: bytes) -> tuple[int, int]:
     return ck_a, ck_b
 ```
 
-Reference C implementation lives in firmware [`main/binary_protocol.h`](https://github.com/MotionApi/example-api-python-logger/blob/main/motionapi_logger.py) and TypeScript in `packages/shared/constants/protocol.ts` (private). Any UBX Fletcher-8 implementation will work — the algorithm is byte-identical.
+The snippet above is byte-identical to both first-party implementations, so it is a usable reference on its own. Those implementations are `ma_checksum_compute()` in the firmware's `main/binary_protocol.cpp` (declared in `main/binary_protocol.h`) and `fletcher8()` in the platform's `packages/shared/constants/protocol.ts` — both repositories are private. Any UBX Fletcher-8 implementation will also work.
 
 ---
 
 ## Message types
 
-| Constant       | Value | Topic mapping     | Payload                                              |
-|----------------|-------|-------------------|------------------------------------------------------|
-| `MA_MSG_GPS`   | 0x01  | `t/{ICCID}/bin`   | `[count:u8][gps_record_t × count]` (batched)         |
-| `MA_MSG_STATUS`| 0x02  | `t/{ICCID}/bin`   | One `status_record_t` (32 B)                         |
-| `MA_MSG_IMU`   | 0x03  | `t/{ICCID}/bin`   | `[base_ts:u32][base_ts_ms:u16][imu_sample_t × N]`    |
-| `MA_MSG_MARK`  | 0x04  | `t/{ICCID}/bin`   | One `gps_record_t` (24 B) — QoS 1, deduped server-side |
+| Constant       | Value | Topic mapping     | Payload                                                        |
+|----------------|-------|-------------------|-----------------------------------------------------------------|
+| `MA_MSG_GPS`   | 0x01  | `t/{ICCID}/bin`   | `[count:u8][gps_record_t × count]` (batched, records 25 B)      |
+| `MA_MSG_STATUS`| 0x02  | `t/{ICCID}/bin`   | One `status_record_t` (34 B on current firmware)                |
+| `MA_MSG_IMU`   | 0x03  | —                 | **Reserved** — no firmware emits this type. See [IMU](#payload--imu-samples-msg_type--0x03-reserved) |
+| `MA_MSG_MARK`  | 0x04  | `t/{ICCID}/bin`   | One bare `gps_record_t` (25 B, no count byte) — QoS 1           |
 
 Unknown `MSG_TYPE` values: a decoder should validate the checksum, skip the frame, and continue scanning the buffer for the next `0x4D 0x41` sync pair.
 
 ---
 
+## Versioning and forward compatibility
+
+There is **no protocol version byte** in an MA frame, and the `fw_version` field inside `status_record_t` **must not be used for feature detection**. It is encoded as `major × 256 + minor`, so the patch component is discarded, and it was not bumped when `cadence_spm` was added — a device sending 25-byte records reports exactly the same value as one sending 24-byte records.
+
+Records only ever grow by **appending trailing fields**. Existing offsets never move and existing fields are never resized or reordered. The normative rule for telling generations apart is therefore length arithmetic, and it is what both the firmware and the server use:
+
+| Message  | Rule                                                                                                    |
+|----------|---------------------------------------------------------------------------------------------------------|
+| GPS `0x01` | `record_size = (payload_len − 1) / count`. Read `cadence_spm` only when `record_size >= 25`.           |
+| MARK `0x04`| Read `cadence_spm` only when `payload_len >= 25`.                                                      |
+| STATUS `0x02` | `temp_c` present when `payload_len >= 33`; `rat` present when `payload_len >= 34`.                  |
+
+Write your decoder so that:
+
+- it never hard-codes a record size — always derive it from the frame;
+- `(payload_len − 1) % count != 0` is treated as a malformed frame, not as something to round;
+- bytes beyond the layout you know about are ignored rather than rejected, so a future trailing field doesn't break you;
+- a missing trailing field is reported as **absent**, not as `0` — those mean different things (see [Stroke cadence](#stroke-cadence-cadence_spm)).
+
+---
+
 ## Payload — GPS record (`gps_record_t`)
 
-24 bytes, packed, little-endian. Used for **single positions** (`MARK`) and inside the **GPS batch** payload.
+25 bytes, packed, little-endian. Used for **single positions** (`MARK`) and inside the **GPS batch** payload.
 
 | Offset | Field          | Type   | Size | Unit              | Notes                                          |
 |--------|----------------|--------|------|-------------------|------------------------------------------------|
 | 0      | `timestamp_s`  | u32 LE | 4    | Unix epoch seconds (UTC) | From UBX NAV-PVT date/time fields        |
 | 4      | `timestamp_ms` | u16 LE | 2    | milliseconds (0–999)     |                                            |
-| 6      | `lat`          | i32 LE | 4    | degrees × 1e7     | Direct from NAV-PVT (e.g. `522277620` = 52.2277620°) |
+| 6      | `lat`          | i32 LE | 4    | degrees × 1e7     | Direct from NAV-PVT (e.g. `521846384` = 52.1846384°) |
 | 10     | `lon`          | i32 LE | 4    | degrees × 1e7     |                                                |
-| 14     | `speed_3d`     | u16 LE | 2    | cm/s              | Max 655.35 m/s ≈ 2359 km/h                     |
+| 14     | `speed_3d`     | u16 LE | 2    | cm/s              | **3D** speed, not ground speed. Max 655.35 m/s ≈ 2359 km/h |
 | 16     | `hMSL`         | i32 LE | 4    | millimeters above mean sea level | Direct from NAV-PVT             |
 | 20     | `hAcc`         | u32 LE | 4    | millimeters (horizontal accuracy estimate) |                       |
+| 24     | `cadence_spm`  | u8     | 1    | strokes/min       | Paddling cadence — trailing field, see below   |
+
+There is no heading/course field in this record.
+
+`cadence_spm` was appended after the original 24-byte layout, so a decoder must confirm the record really is 25 bytes before reading it — see [Versioning and forward compatibility](#versioning-and-forward-compatibility).
 
 **Decode example (Python):**
 
 ```python
 import struct
-GPS_STRUCT = struct.Struct("<IHiiHiI")  # 24 bytes, little-endian
+GPS_STRUCT_BASE    = struct.Struct("<IHiiHiI")   # 24 bytes — pre-cadence firmware
+GPS_STRUCT_CADENCE = struct.Struct("<IHiiHiIB")  # 25 bytes — current firmware
 
-ts_s, ts_ms, lat_e7, lon_e7, speed_cms, hmsl_mm, h_acc_mm = GPS_STRUCT.unpack(payload[:24])
-lat_deg = lat_e7 / 1e7
-lon_deg = lon_e7 / 1e7
-speed_ms = speed_cms / 100
-altitude_m = hmsl_mm / 1000
-h_acc_m = h_acc_mm / 1000
+def decode_gps_record(buf: bytes, off: int, rec_size: int) -> dict:
+    if rec_size >= GPS_STRUCT_CADENCE.size:
+        (ts_s, ts_ms, lat_e7, lon_e7, speed_cms,
+         hmsl_mm, h_acc_mm, cadence) = GPS_STRUCT_CADENCE.unpack_from(buf, off)
+    else:
+        (ts_s, ts_ms, lat_e7, lon_e7, speed_cms,
+         hmsl_mm, h_acc_mm) = GPS_STRUCT_BASE.unpack_from(buf, off)
+        cadence = None  # field absent — NOT the same as 0
+    return {
+        "timestamp_s": ts_s,
+        "timestamp_ms": ts_ms,
+        "lat_deg": lat_e7 / 1e7,
+        "lon_deg": lon_e7 / 1e7,
+        "speed_ms": speed_cms / 100,
+        "altitude_m": hmsl_mm / 1000,
+        "h_acc_m": h_acc_mm / 1000,
+        "cadence_spm": cadence,
+    }
 ```
 
 ### GPS batch payload (`MSG_TYPE = 0x01`)
@@ -118,20 +161,38 @@ The `bin` topic only ever publishes GPS in **batched** form, even for a single p
 ```
 +-------+-----------------+-----------------+---     ---+-----------------+
 | count |  gps_record #1  |  gps_record #2  |   ...    |  gps_record #N  |
-| u8    |   24 bytes      |   24 bytes      |          |   24 bytes      |
+| u8    |   25 bytes      |   25 bytes      |          |   25 bytes      |
 +-------+-----------------+-----------------+---     ---+-----------------+
 
-Total payload size = 1 + (count × 24)
-Max count per frame = 42 (because 1 + 42×24 = 1009 ≤ 1017 = 1024 − 7 overhead)
+Total payload size = 1 + (count × 25)
+Max count per frame = 40   →  payload 1 + 40×25 = 1001 B, frame 1008 B ≤ 1024 B
 ```
 
-A 100-position logging burst (mode `Log 10s`) gets split into **3 back-to-back frames** of 42 + 42 + 16 positions. The server reassembles and emits them as one `gps_batch` packet with `data: HumanGps[]`.
+Derive the count limit as `floor((MQTT_MAX_PAYLOAD_BYTES − 7 − 1) / record_size)` rather than hard-coding 40.
+
+Logging modes never exceed this. At the default 10 Hz mode `Log10s` accumulates ~100 positions per 10 s interval, but the firmware drains **one batch per send interval** and publishes it as its **own MQTT message**: 40 records go out and the remainder stays in the device's ring buffer until the next interval. Batches are never merged into a larger frame, and every frame is decoded independently — see [Multi-frame concatenation](#multi-frame-concatenation).
+
+---
+
+## Stroke cadence (`cadence_spm`)
+
+Byte 24 of every 25-byte `gps_record_t`, on both GPS batch records and MARK payloads. `uint8`, unit **strokes per minute**.
+
+- **Counting convention.** `spm` counts **every blade entry** (sprint-kayak convention). Full stroke cycles per minute are therefore `spm / 2` for a **kayak** (left + right blade per cycle) and `spm` for a **canoe** (single-sided).
+- **Value range.** Either `0`, or a non-zero value clamped to **28–165**. There is no separate "invalid" sentinel.
+- **`0` is ambiguous.** It means **any** of: the device's sport profile is off (this is the default), the paddler is not currently paddling, or the IMU is unavailable. Nothing on the wire reports the active sport profile — `status_record_t.mode` is the mode preset, not the sport — so you cannot distinguish these three cases from the telemetry alone. Confirm out of band.
+- **Absent ≠ 0.** A 24-byte record has no cadence field at all. Keep that distinct from an on-wire `0`.
+- **Enabling it.** Cadence is only produced when the device's persisted sport profile is `1` (canoe), `2` (kayak) or `3` (paddle, auto-detect); the default is `0` (none). The profile is set with `{"cmd":"config","sport":N}` published on `c/{ICCID}/config`.
+
+**Known limitation:** the sport profile cannot currently be set through the public `/v1` API. `POST /v1/devices/:iccid/commands` rejects `cmd:"config"`, and `PUT /v1/devices/:iccid/mode` sends only the mode. Ask us to switch a device's profile until a dedicated endpoint exists.
+
+**Where you can read it:** raw `bin` frames (this document), `/v1` with `format=raw` (decode the base64 yourself) and `/v1` with `format=formatted` (`cadence_spm` on the GPS object, omitted entirely for 24-byte records). It is **not persisted** to the time-series store, so it does not appear in historical position queries — only on live packets and streams.
 
 ---
 
 ## Payload — Status record (`status_record_t`)
 
-32 bytes, packed, little-endian. Sent on every `STATUS` interval (default 30 s — see [§ Device modes](README.md#device-modes)).
+34 bytes on current firmware, packed, little-endian. Sent on every `STATUS` interval (default 30 s — see [§ Device modes](README.md#device-modes)). The first 32 bytes are the original layout; `temp_c` and `rat` are optional trailing fields.
 
 | Offset | Field            | Type   | Size | Unit                                            |
 |--------|------------------|--------|------|-------------------------------------------------|
@@ -148,36 +209,59 @@ A 100-position logging burst (mode `Log 10s`) gets split into **3 back-to-back f
 | 22     | `earfcn`         | u32 LE | 4    | E-UTRA channel number                           |
 | 26     | `num_sv`         | u8     | 1    | satellites in fix                               |
 | 27     | `fix_type`       | u8     | 1    | from NAV-PVT (0 = no fix, 2 = 2D, 3 = 3D, …)    |
-| 28     | `fw_version`     | u16 LE | 2    | encoded as `major × 256 + minor`                |
-| 30     | `mode`           | u8     | 1    | operating mode ID (see Device modes)            |
+| 28     | `fw_version`     | u16 LE | 2    | `major × 256 + minor` — patch dropped; **not** a feature flag |
+| 30     | `mode`           | u8     | 1    | active mode **preset ID** (1–10 standard, 20–28 logging) |
 | 31     | `flags`          | u8     | 1    | bit 0: `is_moving`, bit 1: `stationary_active`  |
+| 32     | `temp_c`         | i8     | 1    | °C ambient — **optional**; `-128` (`INT8_MIN`) = no reading |
+| 33     | `rat`            | u8     | 1    | radio access technology — **optional**; `0xFF` = unknown |
+
+`mode` is a preset ID, not a type flag. Note that the logging IDs are not contiguous: the 18 presets are 1–10 and 20, 21, 22, 23, 25, 26, 27, 28.
+
+`rat` carries the ubxlib `uCellNetRat_t` enum verbatim. The values you are likely to see: `8` = LTE, `10` = LTE-M (CAT-M1), `11` = NB-IoT (NB1); `0` and `0xFF` both mean unknown.
+
+Accept 32-, 33- and 34-byte STATUS payloads and report missing trailing fields as absent.
 
 **Decode example (Python):**
 
 ```python
-STATUS_STRUCT = struct.Struct("<IHHbhbHHIHIBBHBB")  # 32 bytes
+STATUS_STRUCT_BASE = struct.Struct("<IHHbhbHHIHIBBHBB")    # 32 bytes — original layout
+STATUS_STRUCT_FULL = struct.Struct("<IHHbhbHHIHIBBHBBbB")  # 34 bytes — current firmware
 
 (ts_s, ts_ms, batt_mv, rssi, rsrp, rsrq,
  mcc, mnc, cell_id, tac, earfcn,
- num_sv, fix_type, fw_raw, mode_id, flags) = STATUS_STRUCT.unpack(payload[:32])
+ num_sv, fix_type, fw_raw, mode_id, flags) = STATUS_STRUCT_BASE.unpack_from(payload, 0)
+
+temp_c = None
+if len(payload) >= 33:
+    raw_temp = payload[32] - 256 if payload[32] > 127 else payload[32]  # int8
+    if raw_temp != -128:                       # INT8_MIN = no reading
+        temp_c = raw_temp
+
+rat = None
+if len(payload) >= 34 and payload[33] not in (0x00, 0xFF):
+    rat = payload[33]
 
 battery_v = batt_mv / 1000
-fw_version = f"{fw_raw >> 8}.{fw_raw & 0xFF}"
+fw_version = f"{fw_raw >> 8}.{fw_raw & 0xFF}"   # patch component is not on the wire
 is_moving = bool(flags & 0x01)
 stationary_active = bool(flags & 0x02)
 ```
 
 ---
 
-## Payload — IMU samples (`MSG_TYPE = 0x03`)
+## Payload — IMU samples (`MSG_TYPE = 0x03`, reserved)
 
-Used only when IMU streaming is enabled (no preset enables it by default). Payload is a base timestamp followed by N samples that carry only a 16-bit offset, to keep the per-sample size down.
+**Reserved — you will not receive these frames.** `MA_MSG_IMU` and `imu_sample_t` are declared in the protocol header and understood by the server's decoder, but no current firmware emits them: there is no encoder for type `0x03` and no mode preset that enables IMU streaming. The layout is documented so decoders can be forward-compatible.
+
+The payload would be a **7-byte header** — base timestamp plus an explicit sample count — followed by N samples that carry only a 16-bit offset, to keep the per-sample size down.
 
 ```
-+--------------+----------------+-------------+-------------+---    ---+
-| base_ts_s    | base_ts_ms     | sample #1   | sample #2   |   ...   |
-| u32 LE       | u16 LE         | 15 bytes    | 15 bytes    |         |
-+--------------+----------------+-------------+-------------+---    ---+
++--------------+----------------+---------+-------------+-------------+---    ---+
+| base_ts_s    | base_ts_ms     | count   | sample #1   | sample #2   |   ...   |
+| u32 LE @0    | u16 LE @4      | u8 @6   | 15 bytes    | 15 bytes    |         |
++--------------+----------------+---------+-------------+-------------+---    ---+
+
+Total payload size = 7 + (count × 15)
 ```
 
 **`imu_sample_t` — 15 bytes:**
@@ -199,15 +283,19 @@ To convert mg → m/s²: `ax_ms2 = (ax / 1000) × 9.80665`. To convert 0.1 dps �
 
 ## Payload — MARK (`MSG_TYPE = 0x04`)
 
-Identical layout to a single `gps_record_t` (24 B). The MARK frame is sent with **MQTT QoS 1** instead of the default QoS 0 used by the other types, so a user button press doesn't get lost in transit. The server de-duplicates by `(ICCID, timestamp_s, timestamp_ms)` should the QoS retry deliver twice.
+One bare `gps_record_t` (25 B on current firmware) — **no leading count byte**, unlike `MA_MSG_GPS`. That makes the whole frame 32 bytes. A MARK is raised on the device by a double-click, not by a remote command.
+
+The MARK frame is published with **MQTT QoS 1** instead of the QoS 0 used for GPS and STATUS, so a user button press doesn't get lost in transit. The broker may therefore deliver it **more than once**. The server does **not** de-duplicate: a retried MARK is stored and broadcast again. If duplicates matter to you, key on `(ICCID, timestamp_s, timestamp_ms)` yourself.
+
+Because MARK has no count byte, its record size is derived from the payload length alone: read `cadence_spm` only when `payload_len >= 25`.
 
 ---
 
 ## Multi-frame concatenation
 
-A single MQTT message **MAY contain multiple back-to-back frames**. The firmware splits long logging batches like this when the natural drain produces more than 42 positions: e.g. mode `Log 10s` typically emits 100 positions as `[gps_batch(42)][gps_batch(42)][gps_batch(16)]` inside one MQTT publish.
+A single MQTT message **MAY contain multiple back-to-back frames**. The case that actually occurs today is the stationary-sleep update: the firmware concatenates a STATUS frame and a single-record GPS frame into one buffer and publishes them together — 41 + 33 = **74 bytes, two frames, one payload**.
 
-A decoder must therefore loop:
+Logging batches are *not* concatenated this way: each drained batch is its own MQTT publish. Decoders must still loop, because concatenation can appear on any binary payload.
 
 ```python
 def iter_frames(buffer: bytes):
@@ -232,70 +320,86 @@ def iter_frames(buffer: bytes):
         offset += 7 + length
 ```
 
-The `/v1` server already does this for you. When you fetch a binary topic with `format=raw`, the response includes per-frame metadata so you don't have to re-scan:
+The `/v1` server already does this for you. When you fetch a binary topic with `format=raw`, the response includes per-frame metadata so you don't have to re-scan. Here is the stationary STATUS+GPS bundle described above, exactly as it comes back:
 
 ```json
 {
   "type": "packet",
+  "iccid": "8988228066612345678",
   "topic": "bin",
   "format": "raw",
-  "received_at": "2026-05-25T14:30:30.701Z",
+  "received_at": "2026-07-31T09:14:07.200Z",
+  "device_mode": { "id": 1, "name": "Default", "label": "Default", "type": "standard" },
   "raw": {
-    "buffer_b64": "TUEB…",
-    "size": 1009,
+    "buffer_b64": "TUECIgBfZ2xqyACsD7mh//UEAQYATmG8AOEQnBgAAAsDAwABAhgK4ltNQQEaAAFfZ2xqyABwvhofATiNDJwB2qYBAKoFAABK0LM=",
+    "size": 74,
     "frames": [
-      { "offset": 0,   "msg_type": 1, "msg_type_name": "GPS", "length": 1009, "checksum_ok": true }
+      { "msg_type": 2, "msg_type_name": "STATUS", "length": 34, "checksum_ok": true, "offset": 0 },
+      { "msg_type": 1, "msg_type_name": "GPS",    "length": 26, "checksum_ok": true, "offset": 41 }
     ]
   }
 }
 ```
 
-`frames[].offset` is the byte offset inside the decoded `buffer_b64` where each frame begins. `checksum_ok` reflects what the server saw — if a frame fails its own checksum, it's still listed so you can decide whether to attempt recovery or skip.
+`frames[].offset` is the byte offset inside the decoded `buffer_b64` where each frame begins, and `frames[].length` is that frame's **payload** length — the frame occupies `7 + length` bytes. `checksum_ok` is a real per-frame Fletcher-8 result recomputed from those bytes: `false` means the frame is present in the raw buffer but the parser dropped it, so it has no counterpart in the `formatted` view.
+
+Each frame is decoded independently. With `format=formatted`, one MQTT payload yields one delivery per frame — a GPS frame becomes `payload.kind = "gps_batch"` with `data` containing only *that frame's* positions. There is no cross-frame or cross-packet reassembly; stitch batches together yourself if you need a continuous track.
 
 ---
 
-## Worked example — decode a 24 B GPS record
+## Worked example — decode a 25 B GPS record
 
-A single-position frame on `bin` is **32 bytes total**: 5-byte header + 1-byte count + 24-byte record + 2-byte checksum. Hex dump (bytes 0–31, plus annotations):
+A single-position frame on `bin` is **33 bytes total**: 5-byte header + 1-byte count + 25-byte record + 2-byte checksum. This is the second frame of the bundle shown above.
+
+```
+4D 41 01 1A 00 01 5F 67 6C 6A C8 00 70 BE 1A 1F 01 38 8D 0C
+9C 01 DA A6 01 00 AA 05 00 00 4A D0 B3
+```
 
 ```
 offset  bytes                                            field
 ─────── ─────────────────────────────────────────────── ────────────────────────────
 0       4D 41                                            SYNC_1 SYNC_2
 2       01                                               MSG_TYPE = MA_MSG_GPS
-3       19 00                                            LENGTH   = 25 (LE u16)
+3       1A 00                                            LENGTH   = 26 (LE u16)
 5       01                                               batch count = 1
-6       1F 8D B9 6B                                      gps.timestamp_s
-10      02 00                                            gps.timestamp_ms
+6       5F 67 6C 6A                                      gps.timestamp_s
+10      C8 00                                            gps.timestamp_ms
 12      70 BE 1A 1F                                      gps.lat
 16      01 38 8D 0C                                      gps.lon
-20      18 00                                            gps.speed_3d
-22      D4 BD 06 00                                      gps.hMSL
-26      78 0C 00 00                                      gps.hAcc
-30      CK_A CK_B                                        Fletcher-8 over bytes 2..29
+20      9C 01                                            gps.speed_3d
+22      DA A6 01 00                                      gps.hMSL
+26      AA 05 00 00                                      gps.hAcc
+30      4A                                               gps.cadence_spm
+31      D0 B3                                            CK_A CK_B — Fletcher-8 over bytes 2..30
 ```
+
+`LENGTH` is 26 = 1 count byte + 1 × 25 B record. Derived record size: `(26 − 1) / 1 = 25`, so `cadence_spm` is present.
 
 Decoded values:
 
-| Field            | Raw little-endian   | Decoded value                                         |
-|------------------|---------------------|-------------------------------------------------------|
-| `timestamp_s`    | `1F 8D B9 6B`       | 0x6BB98D1F = 1808237343 → 2027-04-26 11:42:23 UTC     |
-| `timestamp_ms`   | `02 00`             | 2                                                     |
-| `lat` (×1e7)     | `70 BE 1A 1F`       | 0x1F1ABE70 = 521903728 → **52.1903728°**              |
-| `lon` (×1e7)     | `01 38 8D 0C`       | 0x0C8D3801 = 210731009 → **21.0731009°**              |
-| `speed_3d` (cm/s)| `18 00`             | 0x0018 = 24 → **0.24 m/s (0.86 km/h)**                |
-| `hMSL` (mm)      | `D4 BD 06 00`       | 0x0006BDD4 = 441812 → **441.812 m**                   |
-| `hAcc` (mm)      | `78 0C 00 00`       | 0x00000C78 = 3192 → **3.192 m**                       |
+| Field              | Raw little-endian   | Decoded value                                         |
+|--------------------|---------------------|-------------------------------------------------------|
+| `timestamp_s`      | `5F 67 6C 6A`       | 0x6A6C675F = 1785489247 → 2026-07-31 09:14:07 UTC     |
+| `timestamp_ms`     | `C8 00`             | 200                                                   |
+| `lat` (×1e7)       | `70 BE 1A 1F`       | 0x1F1ABE70 = 521846384 → **52.1846384°**              |
+| `lon` (×1e7)       | `01 38 8D 0C`       | 0x0C8D3801 = 210581505 → **21.0581505°**              |
+| `speed_3d` (cm/s)  | `9C 01`             | 0x019C = 412 → **4.12 m/s (14.83 km/h)**              |
+| `hMSL` (mm)        | `DA A6 01 00`       | 0x0001A6DA = 108250 → **108.250 m**                   |
+| `hAcc` (mm)        | `AA 05 00 00`       | 0x000005AA = 1450 → **1.450 m**                       |
+| `cadence_spm`      | `4A`                | 0x4A = 74 → **74 strokes/min** (= 37 kayak cycles/min) |
 
-The checksum at offset 30–31 is the Fletcher-8 of bytes `01 19 00 01 1F 8D B9 6B 02 00 70 BE 1A 1F 01 38 8D 0C 18 00 D4 BD 06 00 78 0C 00 00` (MSG_TYPE + LENGTH + PAYLOAD, 28 bytes). Run [`fletcher8()`](#fletcher-8-checksum) over those bytes to verify any captured frame.
+The checksum at offset 31–32 is the Fletcher-8 of the 29 bytes `01 1A 00 01 5F 67 6C 6A C8 00 70 BE 1A 1F 01 38 8D 0C 9C 01 DA A6 01 00 AA 05 00 00 4A` (MSG_TYPE + LENGTH + PAYLOAD), giving `CK_A = 0xD0`, `CK_B = 0xB3`. Run [`fletcher8()`](#fletcher-8-checksum) over those bytes to verify any captured frame.
 
 ---
 
 ## Implementations to read
 
-These two are the canonical reference implementations:
+The authoritative encoder is the firmware:
 
-- **C (firmware encoder, authoritative):** `LTE-M-GPS-Tracker-VSC/main/binary_protocol.h` + `.c` *(private)*
-- **Python (decoder, public):** [`motionapi_logger.py`](https://github.com/MotionApi/example-api-python-logger/blob/main/motionapi_logger.py) — uses `struct.Struct("<IHiiHiI")` for `gps_record_t` and the same `fletcher8` algorithm shown above.
+- **C++ (firmware encoder, authoritative):** `main/binary_protocol.h` + `main/binary_protocol.cpp`, relative to the firmware repository root *(private)*.
+- **TypeScript (server decoder):** `packages/shared/constants/protocol.ts` and `apps/backend/src/mqtt/binaryProtocol.ts`, relative to the platform repository root *(private)*.
+
+Our public example client, [`motionapi_logger.py`](https://github.com/MotionApi/example-api-python-logger/blob/main/motionapi_logger.py), consumes `format=formatted` JSON over the WebSocket stream and does **not** decode binary frames — use it as an authentication/streaming reference only. The `fletcher8()`, `decode_gps_record()` and `iter_frames()` snippets in this document are enough to build a full decoder.
 
 If you spot a discrepancy between this document and the firmware source, the firmware wins — please open an issue and we'll fix the doc.
