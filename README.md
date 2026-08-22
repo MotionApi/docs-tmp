@@ -112,7 +112,7 @@ Each API key carries a list of scopes. Endpoints require specific scopes; if a s
 | `read:last`       | Read the latest cached packet (`/last`, `/last/:topic`)                 |
 | `read:stream`     | Subscribe to WebSocket / SSE real-time streams                          |
 | `write:commands`  | Send commands (buzzer, LED, identify, reboot, …)                        |
-| `write:mode`      | Change device mode preset                                               |
+| `write:mode`      | Change device mode preset or sport profile (persisted device settings)  |
 
 **Reserved — granting them unlocks nothing yet.** The panel offers them and the backend stores them, but no `/v1` route checks them because the matching endpoints do not exist:
 
@@ -146,9 +146,12 @@ All endpoints below sit under `https://api.motionapi.pro/v1` and return the same
 | GET    | `/v1/devices/:iccid/mode`                    | `read:devices` | Full current mode preset (timings, IMU flag, …)      |
 | PUT    | `/v1/devices/:iccid/mode`                    | `write:mode`   | Switch the device to a different mode preset         |
 | PUT    | `/v1/devices/_all/mode`                      | `write:mode`   | Switch **every device your key can control** to a mode preset — see [Fan-out](#fan-out--all-your-devices-at-once) |
+| PUT    | `/v1/devices/:iccid/sport`                   | `write:mode`   | Set the sport profile (turns paddling cadence on/off) — see [Paddling cadence](#paddling-cadence) |
+| PUT    | `/v1/devices/_all/sport`                     | `write:mode`   | Same sport profile on **every device your key can control** |
 | GET    | `/v1/devices/_modes`                         | (any key)      | Static catalog of all 18 mode presets                |
+| GET    | `/v1/devices/_sports`                        | (any key)      | Static catalog of the 4 sport profiles               |
 
-No specific scope is required for `_modes`, but **every** `/v1` route requires authentication — an unauthenticated call still gets 401.
+No specific scope is required for `_modes` / `_sports`, but **every** `/v1` route requires authentication — an unauthenticated call still gets 401.
 
 ### Snapshots — last cached packet per topic
 
@@ -190,8 +193,7 @@ Body shape is `{ "cmd": "<name>", "params": { … } }`. Accepted commands:
 
 Two things this endpoint deliberately will not do:
 
-- **`cmd: "config"` is rejected with 400.** Mode changes go through `PUT /v1/devices/:iccid/mode` instead.
-- Because `config` is blocked, the **sport profile that enables paddling cadence cannot be set through `/v1` at all** — it is only reachable from the user panel today. See [Paddling cadence](#paddling-cadence).
+- **`cmd: "config"` is rejected with 400.** The two persisted device settings have dedicated endpoints: `PUT /v1/devices/:iccid/mode` for the mode preset and `PUT /v1/devices/:iccid/sport` for the sport profile (which enables paddling cadence — see [Paddling cadence](#paddling-cadence)).
 
 Note that `/v1` does not range-check `buzzer` / `led` parameters; the min/max above are UI hints, and out-of-range values reach the device unvalidated. `set_gps_rate` **is** validated (400 on anything outside the five allowed rates).
 
@@ -207,7 +209,7 @@ Each device gets its own `msg_id`, so command responses still correlate per devi
             "sent": [ { "iccid": "8988228066680471500", "msg_id": "…" }, … ] } }
 ```
 
-`PUT /_all/mode` returns the same `broadcast_id` / `total` / `sent` plus `requested_mode`. A key that can control no devices gets `403 forbidden`. Validation is identical to the single-device routes — `config` is still rejected on `/_all/commands`, so the sport profile still cannot be set through `/v1`.
+`PUT /_all/mode` returns the same `broadcast_id` / `total` / `sent` plus `requested_mode`. A key that can control no devices gets `403 forbidden`. `PUT /_all/sport` works the same way with `requested_sport`. Validation is identical to the single-device routes — `config` is still rejected on `/_all/commands`; use `/_all/mode` and `/_all/sport`.
 
 A fan-out is **one request** for rate-limiting purposes, whatever `total` is — prefer it over looping `POST /v1/devices/:iccid/commands` per device, which burns one request each.
 
@@ -463,9 +465,25 @@ The profile is persisted on the device, so it survives reboot and power-cycle.
 
 ### How to enable it
 
-Send `{"cmd": "config", "sport": 1|2|3}` on the device's config downlink.
+`PUT /v1/devices/:iccid/sport` with `{ "sport_id": 1 | 2 | 3 }` (scope `write:mode`). `0` turns the detector back off. The catalog is at `GET /v1/devices/_sports`.
 
-> **Known limitation: you cannot do this through `/v1` today.** `POST /v1/devices/:iccid/commands` rejects `cmd: "config"` outright, and `PUT /v1/devices/:iccid/mode` only ever sends the mode field. There is no `/v1` route for the sport profile. The only place it can be set right now is the **user panel** ("Set Sport" on the device command panel). If you need this on the API, tell us.
+```bash
+curl -X PUT https://api.motionapi.pro/v1/devices/8988228066680471500/sport \
+  -H "Authorization: Bearer mak_live_…" -H "Content-Type: application/json" \
+  -d '{"sport_id": 2}'
+```
+
+```json
+{ "success": true,
+  "data": { "msg_id": "…",
+            "requested_sport": { "id": 2, "name": "Kayak", "label": "Kayak",
+                                 "description": "Paddling cadence, kayak forced", "cadence_enabled": true },
+            "note": "Sport profile acknowledged by backend and persisted in device NVS once received. …" } }
+```
+
+`PUT /v1/devices/_all/sport` applies the same body to every device your key can control in one request (same semantics as the other [fan-out](#fan-out--all-your-devices-at-once) endpoints). On the wire this is `{"cmd":"config","sport":N}` on the device's config downlink — `POST /v1/devices/:iccid/commands` will not let you send that yourself (`config` is rejected there), so use the dedicated endpoint. The user panel's "Set Sport" tile does the same thing.
+
+> **Write-only.** Nothing reports the active profile back — status frames carry the mode preset, not the sport — so remember what you sent. The first non-zero `cadence_spm` on a position is your confirmation that the device received it.
 
 Two more things worth knowing:
 
@@ -500,7 +518,7 @@ Only `cadence_spm` reaches the wire. The detector's internal signals — confide
 | `format=formatted` (REST snapshots, WS, SSE)  | **Yes** — as `cadence_spm` on each position, and on MARK waypoints        |
 | `format=raw`                                  | **Yes** — you decode it out of the record yourself                        |
 | Stored history                                | No — cadence is not persisted anywhere; it exists only on live packets    |
-| Setting the sport profile via `/v1`           | No — see the limitation above                                             |
+| Setting the sport profile via `/v1`           | **Yes** — `PUT /v1/devices/:iccid/sport`; reading it back — no (write-only) |
 
 In `formatted`, the field is **absent** (not `0`) when a device sent a pre-cadence, 24-byte position record. Absent means "this firmware has no cadence field"; `0` means one of the three cases above. Do **not** try to detect the difference from `fw_version` — the wire carries only major.minor, and the version was not bumped when cadence was added.
 
