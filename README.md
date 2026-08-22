@@ -327,7 +327,7 @@ The full wire-level frame format for binary topics (sync `0x4D 0x41`, 8-bit type
 
 ## Rate limits & error envelope
 
-- **Default:** 60 requests/min per key, counted **per endpoint** (each route has its own bucket — 60 `GET …/last` and 60 `POST …/commands` in the same minute are both fine). Per-key custom limit available on request.
+- **Default:** 600 requests/min per key, counted **per endpoint** (each route has its own bucket — 600 `GET …/last` and 600 `POST …/commands` in the same minute are both fine). Per-key custom limit available on request.
 - **Headers:** every `/v1` response carries `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds) — read them instead of guessing.
 - **What counts:** only authenticated requests. A `401` is never charged to a key. The `_all` fan-out endpoints count as one request regardless of how many devices they reach. There is no additional per-IP limit on authenticated `/v1` traffic, so several integrators behind one NAT do not share a bucket.
 - **WebSocket / SSE:** the initial handshake counts; subsequent frames don't.
@@ -336,7 +336,7 @@ The full wire-level frame format for binary topics (sync `0x4D 0x41`, 8-bit type
   { "statusCode": 429,
     "success": false,
     "error": { "code": "rate_limited",
-               "message": "Rate limit exceeded (60 req/min)",
+               "message": "Rate limit exceeded (600 req/min)",
                "details": { "retry_after_ms": 12345 } } }
   ```
 
