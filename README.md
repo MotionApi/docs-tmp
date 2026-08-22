@@ -145,6 +145,7 @@ All endpoints below sit under `https://api.motionapi.pro/v1` and return the same
 | GET    | `/v1/devices/:iccid`                         | `read:devices` | Single device with cached status + current mode      |
 | GET    | `/v1/devices/:iccid/mode`                    | `read:devices` | Full current mode preset (timings, IMU flag, …)      |
 | PUT    | `/v1/devices/:iccid/mode`                    | `write:mode`   | Switch the device to a different mode preset         |
+| PUT    | `/v1/devices/_all/mode`                      | `write:mode`   | Switch **every device your key can control** to a mode preset — see [Fan-out](#fan-out--all-your-devices-at-once) |
 | GET    | `/v1/devices/_modes`                         | (any key)      | Static catalog of all 18 mode presets                |
 
 No specific scope is required for `_modes`, but **every** `/v1` route requires authentication — an unauthenticated call still gets 401.
@@ -165,6 +166,7 @@ Add `?format=raw` to get the bytes the device actually sent (base64 + frame meta
 | Method | Path                                         | Scope             | Description                                              |
 |--------|----------------------------------------------|-------------------|----------------------------------------------------------|
 | POST   | `/v1/devices/:iccid/commands`                | `write:commands`  | Send a command to the device over the MQTT downlink      |
+| POST   | `/v1/devices/_all/commands`                  | `write:commands`  | Same command to **every device your key can control** — see [Fan-out](#fan-out--all-your-devices-at-once) |
 
 Body shape is `{ "cmd": "<name>", "params": { … } }`. Accepted commands:
 
@@ -192,6 +194,22 @@ Two things this endpoint deliberately will not do:
 - Because `config` is blocked, the **sport profile that enables paddling cadence cannot be set through `/v1` at all** — it is only reachable from the user panel today. See [Paddling cadence](#paddling-cadence).
 
 Note that `/v1` does not range-check `buzzer` / `led` parameters; the min/max above are UI hints, and out-of-range values reach the device unvalidated. `set_gps_rate` **is** validated (400 on anything outside the five allowed rates).
+
+### Fan-out — all your devices at once
+
+`POST /v1/devices/_all/commands` and `PUT /v1/devices/_all/mode` take exactly the same body as their per-ICCID counterparts and apply it to **every device the key can control** in one request: devices you own plus devices shared with you with `control` or `manage` (a `view`-only share is skipped), further narrowed by the key's device whitelist if it has one. `_all` is a literal path segment, not an ICCID.
+
+Each device gets its own `msg_id`, so command responses still correlate per device; the response lists them:
+
+```json
+{ "success": true,
+  "data": { "broadcast_id": "7c0b…", "cmd": "buzzer", "total": 12,
+            "sent": [ { "iccid": "8988228066680471500", "msg_id": "…" }, … ] } }
+```
+
+`PUT /_all/mode` returns the same `broadcast_id` / `total` / `sent` plus `requested_mode`. A key that can control no devices gets `403 forbidden`. Validation is identical to the single-device routes — `config` is still rejected on `/_all/commands`, so the sport profile still cannot be set through `/v1`.
+
+A fan-out is **one request** for rate-limiting purposes, whatever `total` is — prefer it over looping `POST /v1/devices/:iccid/commands` per device, which burns one request each.
 
 ### Curl quick-start
 
@@ -309,11 +327,14 @@ The full wire-level frame format for binary topics (sync `0x4D 0x41`, 8-bit type
 
 ## Rate limits & error envelope
 
-- **Default:** 60 requests/min per key. Per-key custom limit available on request.
+- **Default:** 60 requests/min per key, counted **per endpoint** (each route has its own bucket — 60 `GET …/last` and 60 `POST …/commands` in the same minute are both fine). Per-key custom limit available on request.
+- **Headers:** every `/v1` response carries `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds) — read them instead of guessing.
+- **What counts:** only authenticated requests. A `401` is never charged to a key. The `_all` fan-out endpoints count as one request regardless of how many devices they reach. There is no additional per-IP limit on authenticated `/v1` traffic, so several integrators behind one NAT do not share a bucket.
 - **WebSocket / SSE:** the initial handshake counts; subsequent frames don't.
 - **Limit hit:** HTTP `429 Too Many Requests` with `Retry-After` header **and** body:
   ```json
-  { "success": false,
+  { "statusCode": 429,
+    "success": false,
     "error": { "code": "rate_limited",
                "message": "Rate limit exceeded (60 req/min)",
                "details": { "retry_after_ms": 12345 } } }
