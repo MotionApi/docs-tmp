@@ -170,7 +170,7 @@ Max count per frame = 40   →  payload 1 + 40×25 = 1001 B, frame 1008 B ≤ 10
 
 Derive the count limit as `floor((MQTT_MAX_PAYLOAD_BYTES − 7 − 1) / record_size)` rather than hard-coding 40.
 
-Logging modes never exceed this. At the default 10 Hz mode `Log10s` accumulates ~100 positions per 10 s interval, but the firmware drains **one batch per send interval** and publishes it as its **own MQTT message**: 40 records go out and the remainder stays in the device's ring buffer until the next interval. Batches are never merged into a larger frame, and every frame is decoded independently — see [Multi-frame concatenation](#multi-frame-concatenation).
+Logging modes never exceed this. At the default 10 Hz mode `Log10s` accumulates ~100 positions per 10 s interval, but the firmware drains **one batch per send interval** and publishes it as its **own MQTT message**: 40 records go out and the remainder stays in the device's ring buffer until the next interval. Batches are never merged into a larger frame, and every frame is decoded independently — see [Multi-frame concatenation](#multi-frame-concatenation). This caps drain throughput at 40 records per interval — at 10 Hz sampling, `Log5s` (8 rec/s) and `Log10s` (4 rec/s) drain slower than fixes accumulate, so they only keep up at lower GNSS rates.
 
 ---
 
@@ -184,7 +184,7 @@ Byte 24 of every 25-byte `gps_record_t`, on both GPS batch records and MARK payl
 - **Absent ≠ 0.** A 24-byte record has no cadence field at all. Keep that distinct from an on-wire `0`.
 - **Enabling it.** Cadence is only produced when the device's persisted sport profile is `1` (canoe), `2` (kayak) or `3` (paddle, auto-detect); the default is `0` (none). The profile is set with `{"cmd":"config","sport":N}` published on `c/{ICCID}/config`.
 
-**Known limitation:** the sport profile cannot currently be set through the public `/v1` API. `POST /v1/devices/:iccid/commands` rejects `cmd:"config"`, and `PUT /v1/devices/:iccid/mode` sends only the mode. Ask us to switch a device's profile until a dedicated endpoint exists.
+The profile can also be set through the public `/v1` API: `PUT /v1/devices/:iccid/sport` with `{"sport_id": N}` (scope `write:mode`; catalog at `GET /v1/devices/_sports`, bulk variant `PUT /v1/devices/_all/sport`). `POST /v1/devices/:iccid/commands` still rejects `cmd:"config"` — the dedicated endpoint is the only REST path.
 
 **Where you can read it:** raw `bin` frames (this document), `/v1` with `format=raw` (decode the base64 yourself) and `/v1` with `format=formatted` (`cadence_spm` on the GPS object, omitted entirely for 24-byte records). It is **not persisted** to the time-series store, so it does not appear in historical position queries — only on live packets and streams.
 

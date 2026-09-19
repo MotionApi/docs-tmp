@@ -373,8 +373,8 @@ What a preset does **not** control:
 
 The 18 presets split into two families:
 
-- **Standard modes** — the device publishes its **most recent** position on a fixed interval, one MQTT message per publish. Only mode 2 (interval 0) publishes on every GNSS fix; every other standard preset discards the fixes between sends — mode 1 sends 1/s while GNSS samples at 10 Hz, so 9 of 10 fixes never leave the device. Use a logging mode if you need every fix.
-- **Logging modes** — the device samples GPS at 10 Hz into an on-device ring buffer (4000 positions, 100 000 bytes) and sends them in **batches** over a compact binary frame on the `bin` topic. Pick these when you care about data efficiency, route fidelity, or surviving connectivity gaps. Each drain publishes exactly **one** frame of at most **40** positions — `(1024 − 7 − 1) / 25`, against the LEXI-R422 modem's 1024 B MQTT payload limit. Anything beyond 40 stays in the ring buffer until the next drain; the device never fires back-to-back packets to flush a long interval.
+- **Standard modes** — the device publishes its **most recent** position on a fixed interval, one MQTT message per publish. Only mode 2 (interval 0) publishes on every GNSS fix; every other standard preset discards the fixes between sends — mode 1 sends 1/s while GNSS samples at 10 Hz, so 9 of 10 fixes never leave the device. Positions go out at QoS 0 with no queueing or retry — during a connectivity outage, standard-mode positions are simply lost until the device reconnects. Use a logging mode if you need every fix.
+- **Logging modes** — the device samples GPS at the configured GNSS rate (10 Hz by default) into an on-device ring buffer (4000 positions, 100 000 bytes) and sends them in **batches** over a compact binary frame on the `bin` topic. Pick these when you care about data efficiency, route fidelity, or surviving connectivity gaps. Each drain publishes exactly **one** frame of at most **40** positions — `(1024 − 7 − 1) / 25`, against the LEXI-R422 modem's 1024 B MQTT payload limit. Anything beyond 40 stays in the ring buffer until the next drain; the device never fires back-to-back packets to flush a long interval. The buffer covers ~6.7 min at 10 Hz (~16.7 min at 4 Hz, ~66 min at 1 Hz); when full, the **oldest** record is silently overwritten — an outage longer than the buffer window irreversibly loses the start of the gap, while the newest data survives. The buffer lives in RAM, so a reboot or power-off discards anything unsent.
 
 ### Standard modes
 
@@ -408,7 +408,7 @@ Every fix is buffered and sent as a batched binary frame on `t/{ICCID}/bin` → 
 | 25 | Log 5s       | 5 s                | 40 of ~50 buffered¹        | Drives, long sessions                                |
 | 26 | Log 10s      | 10 s               | 40 of ~100 buffered¹       | Maximum data savings, long routes                    |
 
-¹ The firmware drains **one** frame per interval, capped at 40 records. At 10 Hz modes 25 and 26 buffer more than a single frame can carry, so the surplus waits for the next drain instead of going out as extra packets.
+¹ The firmware drains **one** frame per interval, capped at 40 records. At 10 Hz modes 25 and 26 buffer more than a single frame can carry, so the surplus waits for the next drain instead of going out as extra packets. That caps drain throughput at 40 records per interval — at 10 Hz sampling (10/s incoming) modes 25 (8/s) and 26 (4/s) can never keep up and the buffer eventually overwrites; pair them with a lower GNSS rate.
 
 > Mode IDs are deliberately sparse (gaps at 11–19, 24, 29+) so new presets can be added later without renumbering. **24 is not a valid ID** — the 18 real IDs are 1–10 and 20, 21, 22, 23, 25, 26, 27, 28.
 
